@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noimageindex">
+<title>Concept Axes</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --panel: #ffffff; --ink: #1b1b1a; --muted: #5f5e59;
+    --line: #d9d7cf; --accent: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --panel: #21211f; --ink: #f1efe8; --muted: #a8a69e;
+      --line: #3a3a36; --accent: #f2867e;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column; background: var(--bg); color: var(--ink);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header { padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  h1 { margin: 0 0 8px; font-size: 18px; font-weight: 650; }
+  form { display: flex; flex-wrap: wrap; gap: 10px 20px; align-items: flex-end; }
+  label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); }
+  input[type=text] {
+    width: 170px; padding: 7px 9px; font: inherit; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  }
+  button {
+    padding: 7px 14px; font: inherit; font-weight: 600; cursor: pointer;
+    color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  }
+  button[type=submit] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  button:disabled { opacity: .55; cursor: progress; }
+  .tools { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-top: 8px; font-size: 13px; color: var(--muted); }
+  .tools label { flex-direction: row; align-items: center; gap: 6px; font-size: 13px; }
+  .tools button { padding: 2px 10px; font-weight: 500; }
+  #status { color: var(--muted); }
+  #status.error { color: var(--accent); }
+  main { position: relative; flex: 1; min-height: 340px; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+  canvas.dragging { cursor: grabbing; }
+  canvas.over { cursor: pointer; }
+  .axis { position: absolute; padding: 1px 7px; font-size: 13px; font-weight: 600; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; pointer-events: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #xlo { left: 10px; bottom: 10px; }
+  #xhi { right: 10px; bottom: 10px; }
+  #yhi { left: 10px; top: 10px; }
+  #ylo { left: 10px; bottom: 40px; }
+  #tip { position: absolute; display: none; max-width: 280px; padding: 7px 10px; font-size: 13px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,.2); pointer-events: none; z-index: 2; }
+  #tip b { display: block; }
+  #tip small { display: block; margin-top: 3px; color: var(--muted); }
+  footer { padding: 7px 16px; font-size: 12px; color: var(--muted); background: var(--panel); border-top: 1px solid var(--line); }
+  footer a { color: inherit; }
+  @media (max-width: 640px) { input[type=text] { width: 130px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Concept Axes</h1>
+  <form id="form">
+    <label>Horizontal concept <input type="text" id="xa" value="power" required></label>
+    <label>Vertical concept <input type="text" id="ya" value="beauty" required></label>
+    <button type="submit" id="go" disabled>Arrange</button>
+  </form>
+  <div class="tools">
+    <label>Image size <input type="range" id="size" min="16" max="90" value="34"></label>
+    <label><input type="checkbox" id="even"> Spread evenly</label>
+    <span><button type="button" id="out" aria-label="Zoom out">−</button> <button type="button" id="in" aria-label="Zoom in">+</button> <button type="button" id="reset">Reset view</button></span>
+    <span id="status" role="status">Loading…</span>
+  </div>
+</header>
+<main id="main">
+  <canvas id="c" aria-label="Paintings arranged along two concept axes. Click a painting to open its page on the museum's website."></canvas>
+  <div class="axis" id="xlo" hidden></div><div class="axis" id="xhi" hidden></div>
+  <div class="axis" id="yhi" hidden></div><div class="axis" id="ylo" hidden></div>
+  <div id="tip"></div>
+</main>
+<footer>
+  Classroom experiment, not affiliated with or endorsed by any museum. Positions are computed by the CLIP model, not by curators.
+  Open-access images and data from the <a href="https://www.nga.gov" target="_blank" rel="noopener">National Gallery of Art</a>, <a href="https://www.artic.edu" target="_blank" rel="noopener">Art Institute of Chicago</a> and <a href="https://www.clevelandart.org" target="_blank" rel="noopener">Cleveland Museum of Art</a>. Click a painting to view it on its museum's website.
+</footer>
+
+<script type="module">
+import { AutoTokenizer, CLIPTextModelWithProjection } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.2";
+
+const MODEL = "Xenova/clip-vit-base-patch32";
+const DIM = 512;
+const TEMPLATES = ["{}", "a painting of {}", "an artwork showing {}"];
+const ANIM_MS = 900;
+const LOAD_CONCURRENCY = 12;
+
+const $ = id => document.getElementById(id);
+const canvas = $("c"), ctx = canvas.getContext("2d"), main = $("main"), tip = $("tip");
+const status = (text, error = false) => { $("status").textContent = text; $("status").classList.toggle("error", error); };
+
+let items = [], emb, tokenizer, textModel;
+let W = 0, H = 0, view = { k: 1, x: 0, y: 0 }, hovered = -1;
+let animStart = 0, animating = false, queued = false, runId = 0, lastScores = null;
+const cache = new Map();
+
+function draw() {
+  queued = false;
+  const now = performance.now();
+  const t = animating ? Math.min(1, (now - animStart) / ANIM_MS) : 1;
+  const e = t < .5 ? 4 * t ** 3 : 1 - (-2 * t + 2) ** 3 / 2;
+  for (const it of items) { it.x = it.fx + (it.tx - it.fx) * e; it.y = it.fy + (it.ty - it.fy) * e; }
+  if (animating && t === 1) animating = false;
+
+  const dpr = devicePixelRatio || 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  for (let i = 0; i < items.length; i++) if (i !== hovered) drawItem(items[i], false);
+  if (hovered >= 0) drawItem(items[hovered], true);
+  if (animating) requestDraw();
+}
+
+function requestDraw() { if (!queued) { queued = true; requestAnimationFrame(draw); } }
+
+function box(it) {
+  const s = +$("size").value * Math.sqrt(view.k);
+  const r = s / Math.max(it.w, it.h);
+  const pad = 50;
+  return {
+    cx: view.x + (pad + it.x * (W - 2 * pad)) * view.k,
+    cy: view.y + (pad + (1 - it.y) * (H - 2 * pad)) * view.k,
+    w: it.w * r, h: it.h * r,
+  };
+}
+
+function drawItem(it, active) {
+  const { cx, cy, w, h } = box(it);
+  if (cx + w < 0 || cx - w > W || cy + h < 0 || cy - h > H) return;
+  if (!it.img) return;
+  ctx.drawImage(it.img, cx - w / 2, cy - h / 2, w, h);
+  if (active) {
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--accent");
+    ctx.lineWidth = 2;
+    ctx.strokeRect(cx - w / 2, cy - h / 2, w, h);
+  }
+}
+
+function hit(mx, my) {
+  if (hovered >= 0 && inside(items[hovered], mx, my)) return hovered;
+  for (let i = items.length - 1; i >= 0; i--) if (inside(items[i], mx, my)) return i;
+  return -1;
+}
+function inside(it, mx, my) {
+  const { cx, cy, w, h } = box(it);
+  return Math.abs(mx - cx) <= w / 2 && Math.abs(my - cy) <= h / 2;
+}
+
+function resize() {
+  const r = main.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+  W = r.width; H = r.height;
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  clampView(); requestDraw();
+}
+
+function clampView() {
+  view.k = Math.min(10, Math.max(1, view.k));
+  view.x = Math.min(0, Math.max(W * (1 - view.k), view.x));
+  view.y = Math.min(0, Math.max(H * (1 - view.k), view.y));
+}
+function zoomAt(mx, my, factor) {
+  const k = Math.min(10, Math.max(1, view.k * factor)), f = k / view.k;
+  view.x = mx - (mx - view.x) * f; view.y = my - (my - view.y) * f; view.k = k;
+  clampView(); requestDraw();
+}
+
+function showTip(i, mx, my) {
+  if (i < 0) { tip.style.display = "none"; return; }
+  const it = items[i];
+  tip.replaceChildren();
+  const b = document.createElement("b"); b.textContent = it.title;
+  const artist = document.createElement("span"); artist.textContent = [it.artist, it.date].filter(Boolean).join(", ");
+  const hint = document.createElement("small"); hint.textContent = `Click to open on ${it.site}`;
+  tip.append(b, artist, hint);
+  tip.style.display = "block";
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  tip.style.left = Math.min(W - tw - 6, mx + 14) + "px";
+  tip.style.top = (my + 14 + th > H ? Math.max(4, my - th - 10) : my + 14) + "px";
+}
+
+let drag = null;
+canvas.addEventListener("pointerdown", e => {
+  drag = { sx: e.offsetX, sy: e.offsetY, vx: view.x, vy: view.y, moved: false };
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener("pointermove", e => {
+  if (drag) {
+    const dx = e.offsetX - drag.sx, dy = e.offsetY - drag.sy;
+    if (Math.hypot(dx, dy) > 4) drag.moved = true;
+    if (drag.moved) {
+      view.x = drag.vx + dx; view.y = drag.vy + dy; clampView();
+      canvas.classList.add("dragging"); tip.style.display = "none"; requestDraw();
+    }
+    return;
+  }
+  const i = hit(e.offsetX, e.offsetY);
+  if (i !== hovered) { hovered = i; requestDraw(); }
+  canvas.classList.toggle("over", i >= 0);
+  showTip(i, e.offsetX, e.offsetY);
+});
+canvas.addEventListener("pointerup", e => {
+  const wasDrag = drag && drag.moved;
+  drag = null; canvas.classList.remove("dragging");
+  if (wasDrag) return;
+  const i = hit(e.offsetX, e.offsetY);
+  if (i >= 0) window.open(items[i].url, "_blank", "noopener");
+});
+canvas.addEventListener("pointerleave", () => { hovered = -1; tip.style.display = "none"; requestDraw(); });
+canvas.addEventListener("wheel", e => { e.preventDefault(); zoomAt(e.offsetX, e.offsetY, Math.exp(-e.deltaY * .0015)); }, { passive: false });
+canvas.addEventListener("contextmenu", e => e.preventDefault());
+$("in").onclick = () => zoomAt(W / 2, H / 2, 1.5);
+$("out").onclick = () => zoomAt(W / 2, H / 2, 1 / 1.5);
+$("reset").onclick = () => { view = { k: 1, x: 0, y: 0 }; requestDraw(); };
+$("size").oninput = requestDraw;
+$("even").onchange = () => { if (lastScores) place(lastScores.sx, lastScores.sy); };
+new ResizeObserver(resize).observe(main);
+
+async function encode(concept) {
+  const key = concept.toLowerCase();
+  if (cache.has(key)) return cache.get(key);
+  const texts = TEMPLATES.map(t => t.replace("{}", concept));
+  const inputs = tokenizer(texts, { padding: true, truncation: true });
+  const { text_embeds } = await textModel(inputs);
+  const v = new Float32Array(DIM);
+  for (let n = 0; n < texts.length; n++) {
+    const row = text_embeds.data.subarray(n * DIM, (n + 1) * DIM);
+    const norm = Math.hypot(...row);
+    for (let d = 0; d < DIM; d++) v[d] += row[d] / norm;
+  }
+  const norm = Math.hypot(...v);
+  for (let d = 0; d < DIM; d++) v[d] /= norm;
+  cache.set(key, v);
+  return v;
+}
+
+function similarities(v) {
+  const out = new Float32Array(items.length);
+  for (let i = 0; i < items.length; i++) {
+    let s = 0;
+    for (let d = 0, o = i * DIM; d < DIM; d++) s += emb[o + d] * v[d];
+    out[i] = s;
+  }
+  return out;
+}
+
+function normalise(scores, even) {
+  const order = Array.from(scores.keys()).sort((p, q) => scores[p] - scores[q]);
+  const n = scores.length, out = new Float32Array(n);
+  if (even) {
+    order.forEach((idx, rank) => { out[idx] = rank / (n - 1); });
+    return out;
+  }
+  const lo = scores[order[Math.floor(n * .01)]], hi = scores[order[Math.floor(n * .99)]];
+  const span = hi - lo || 1;
+  for (let i = 0; i < n; i++) out[i] = Math.min(1, Math.max(0, (scores[i] - lo) / span));
+  return out;
+}
+
+function place(sx, sy) {
+  lastScores = { sx, sy };
+  const even = $("even").checked, nx = normalise(sx, even), ny = normalise(sy, even);
+  items.forEach((it, i) => { it.fx = it.x; it.fy = it.y; it.tx = nx[i]; it.ty = ny[i]; });
+  animStart = performance.now(); animating = true; requestDraw();
+}
+
+function label(id, text) { const el = $(id); el.textContent = text; el.title = text; el.hidden = false; }
+
+async function arrange() {
+  const xa = $("xa").value.trim(), ya = $("ya").value.trim();
+  if (!xa || !ya || !textModel) return;
+  const run = ++runId;
+  status("Arranging…");
+  try {
+    const sx = similarities(await encode(xa)), sy = similarities(await encode(ya));
+    if (run !== runId) return;
+    place(sx, sy);
+    label("xhi", `${xa} →`); label("xlo", `← less ${xa}`);
+    label("yhi", `↑ ${ya}`); label("ylo", `↓ less ${ya}`);
+    status(`${items.length.toLocaleString("en-US")} paintings arranged. Scroll to zoom, drag to move.`);
+  } catch (err) {
+    console.error(err);
+    if (run === runId) status("Couldn't process those concepts. Try different words.", true);
+  }
+}
+
+function loadImages() {
+  let next = 0;
+  const pump = () => {
+    if (next >= items.length) return;
+    const it = items[next++], img = new Image();
+    img.onload = () => { it.img = img; requestDraw(); pump(); };
+    img.onerror = pump;
+    img.src = it.thumb;
+  };
+  for (let i = 0; i < LOAD_CONCURRENCY; i++) pump();
+}
+
+async function start() {
+  const [meta, buf] = await Promise.all([
+    fetch("paintings.json").then(r => { if (!r.ok) throw new Error("paintings.json"); return r.json(); }),
+    fetch("embeddings.bin").then(r => { if (!r.ok) throw new Error("embeddings.bin"); return r.arrayBuffer(); }),
+  ]);
+  emb = new Float32Array(buf);
+  const cols = Math.ceil(Math.sqrt(meta.length));
+  items = meta.map((m, i) => {
+    const x = (i % cols) / (cols - 1), y = 1 - Math.floor(i / cols) / (cols - 1);
+    return { ...m, x, y, fx: x, fy: y, tx: x, ty: y, img: null };
+  });
+  resize();
+  loadImages();
+
+  const files = {};
+  const progress = p => {
+    if (p.status !== "progress" || !p.total) return;
+    files[p.file] = [p.loaded, p.total];
+    const all = Object.values(files), done = all.reduce((s, f) => s + f[0], 0), total = all.reduce((s, f) => s + f[1], 0);
+    status(`Loading CLIP model (first visit only): ${Math.round(done / total * 100)}%`);
+  };
+  status("Loading CLIP model (first visit only)…");
+  tokenizer = await AutoTokenizer.from_pretrained(MODEL);
+  textModel = await CLIPTextModelWithProjection.from_pretrained(MODEL, { dtype: "q8", progress_callback: progress });
+  $("go").disabled = false;
+  await arrange();
+}
+
+$("form").addEventListener("submit", e => { e.preventDefault(); arrange(); });
+start().catch(err => { console.error(err); status("Couldn't load. Check your connection and refresh the page.", true); });
+</script>
+</body>
+</html>
