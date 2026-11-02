@@ -91,7 +91,8 @@ const MODEL = "Xenova/clip-vit-base-patch32";
 const DIM = 512;
 const TEMPLATES = ["{}", "a painting of {}", "an artwork showing {}"];
 const ANIM_MS = 900;
-const LOAD_CONCURRENCY = 12;
+const LOAD_CONCURRENCY = 6;
+const IMAGE_RETRIES = 4;
 
 const $ = id => document.getElementById(id);
 const canvas = $("c"), ctx = canvas.getContext("2d"), main = $("main"), tip = $("tip");
@@ -290,14 +291,22 @@ async function arrange() {
   }
 }
 
+function fetchImage(it, attempt, done) {
+  const img = new Image();
+  img.onload = () => { it.img = img; requestDraw(); done(); };
+  img.onerror = () => {
+    if (attempt >= IMAGE_RETRIES) return done();
+    setTimeout(() => fetchImage(it, attempt + 1, done), 1000 * 2 ** attempt);
+  };
+  img.src = attempt ? `${it.thumb}?retry=${attempt}` : it.thumb;
+}
+
 function loadImages() {
   let next = 0;
   const pump = () => {
     if (next >= items.length) return;
-    const it = items[next++], img = new Image();
-    img.onload = () => { it.img = img; requestDraw(); pump(); };
-    img.onerror = pump;
-    img.src = it.thumb;
+    const it = items[next++];
+    fetchImage(it, 0, pump);
   };
   for (let i = 0; i < LOAD_CONCURRENCY; i++) pump();
 }
